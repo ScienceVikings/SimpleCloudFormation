@@ -6,4 +6,4 @@ phases:
       - set -e
       - mkdir ./build
       - cp ./public/** ./build
-      - aws s3 sync ./build s3://SimpleCloudFormation
+      - aws s3 sync ./build s3://simple-cloud-formation

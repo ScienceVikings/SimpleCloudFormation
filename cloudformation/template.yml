@@ -1,0 +1,184 @@
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: SimpleCloudFormation
+    Description: The name of the project we want to make.
+  ProjectSourceLocation:
+    Type: String
+    Default: "https://github.com/ScienceVikings/SimpleCloudFormation.git"
+    Description: Location of the code for CodeBuild to utilize.
+
+Resources:
+
+  S3Bucket:
+    DeletionPolicy: 'Delete'
+    Properties:
+      AccessControl: 'Private'
+      BucketName: !Ref ProjectName
+    Type: 'AWS::S3::Bucket'
+
+  S3BucketPolicy:
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+            Effect: 'Allow'
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+            Resource:
+              - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+    Type: 'AWS::S3::BucketPolicy'
+
+  CloudFront:
+    Properties:
+      DistributionConfig:
+        # Aliases: [ "mysite.example.com" ]
+        # ViewerCertificate:
+        #   AcmCertificateArn: !Ref ACMCert
+        #   SslSupportMethod: sni-only
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - 'HEAD'
+            - 'GET'
+          CachedMethods:
+            - 'HEAD'
+            - 'GET'
+          Compress: false
+          DefaultTTL: 86400
+          ForwardedValues:
+            Cookies:
+              Forward: 'none'
+            Headers:
+              - 'Origin'
+            QueryString: false
+          MaxTTL: 31536000
+          MinTTL: 86400
+          TargetOriginId: !Sub 's3-origin-${S3Bucket}'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        DefaultRootObject: 'index.html'
+        Enabled: true
+        HttpVersion: 'http1.1'
+        IPV6Enabled: false
+        Origins:
+          - DomainName: !GetAtt S3Bucket.DomainName
+            Id: !Sub 's3-origin-${S3Bucket}'
+            OriginPath: ''
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}'
+        PriceClass: 'PriceClass_All'
+    Type: 'AWS::CloudFront::Distribution'
+
+  CloudFrontOriginAccessIdentity:
+    Metadata:
+      Comment: 'Access S3 bucket content only through CloudFront'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: 'Access S3 bucket content only through CloudFront'
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+  
+  # ACMCert:
+  #   Type: "AWS::CertificateManager::Certificate"
+  #   Properties:
+  #     DomainName: "mysite.example.com"
+  #     ValidationMethod: DNS
+
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    DependsOn: [S3Bucket, CodeBuildSourceCredential, CodeBuildRole]
+    Properties:
+      Name: !Ref ProjectName
+      EncryptionKey: !Join ["arn:aws:kms:", !Ref "AWS::Region", ":", !Ref "AWS::AccountId", ":alias/aws/s3"]
+      ServiceRole: !GetAtt [CodeBuildRole, Arn]
+      Source:
+        Type: GITHUB
+        Location: !Ref ProjectSourceLocation
+        GitCloneDepth: 1
+        # Auth:
+        #   Resource: !Ref CodeBuildSourceCredential
+        #   Type: OAUTH
+      Artifacts:
+        Type: S3
+        Location: !Ref S3Bucket
+        Name: build
+        Packaging: NONE
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/standard:4.0"
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          -  - Type: EVENT
+               Pattern: "PUSH, PULL_REQUEST_MERGED"
+               ExcludeMatchedPattern: false
+    
+  # CodeBuildSourceCredential:
+  #   Type: AWS::CodeBuild::SourceCredential
+  #   Properties:
+  #     AuthType: PERSONAL_ACCESS_TOKEN
+  #     ServerType: GITHUB
+  #     Token: "{{resolve:secretsmanager:MySecret/Token:SecretString:MyAccessToken}}"
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['CodeBuild-', !Ref ProjectName]
+      Path: /service-role/
+      Policies:
+        - PolicyName: !Join ['CodeBuildBasePolicy-', !Ref ProjectName]
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Resource:
+                  - !Join ["arn:aws:logs:", !Ref "AWS::Region, ":", !Ref "AWS::AccountId", ":log-group:/aws/codebuild/", !Ref ProjectName]
+                  - !Join ["arn:aws:logs:", !Ref "AWS::Region, ":", !Ref "AWS::AccountId", ":log-group:/aws/codebuild/", !Ref ProjectName, ":*"]
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+              - Effect: Allow
+                Resource:
+                  - !Join ["arn:aws:s3:::codepipeline-", !Ref "AWS::Region, "-*"]
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketAcl"
+                  - "s3:GetBucketLocation"
+              - Effect: Allow
+                Resource:
+                  - !Join ["arn:aws:s3:::", !Ref ProjectName]
+                  - !Join ["arn:aws:s3:::", !Ref ProjectName, "/*"]
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetBucketAcl"
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+              - Effect: Allow
+                Resource:
+                  - !Join ["arn:aws:codebuild:", !Ref "AWS::Region, ":", !Ref "AWS::AccountId", ":report-group/", !Ref ProjectName, "-*"]
+                Action:
+                  - "codebuild:CreateReportGroup"
+                  - "codebuild:CreateReport"
+                  - "codebuild:UpdateReport"
+                  - "codebuild:BatchPutTestCases"
+                  - "codebuild:BatchPutCodeCoverages"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+Outputs:
+  CloudFrontDomainName:
+    Value: !GetAtt CloudFront.DomainName
+  CloudFrontId:
+    Value: !Ref CloudFront
